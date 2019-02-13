@@ -1,0 +1,119 @@
+---
+title: "Main"
+author: "Benjamin"
+date: '2019-02-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(tidyverse, rvest, furrr)
+
+plan(multiprocess, workers = 2)
+```
+
+```{r}
+data <- read_csv("data/partyfacts-core-parties.csv")
+data
+```
+
+```{r}
+data %>%
+  count(is.na(wikipedia))
+```
+
+```{r}
+
+get_wiki <- function(url){
+  
+  page <- try(read_html(url))
+  if(class(page)[1] == "try-error") return(NULL)
+  
+  if(length(page %>% html_nodes(".vcard")) == 0){
+    meta_info <- NULL
+  } else {
+    meta_info <- page %>%
+      html_nodes(".vcard") %>%
+      html_children %>%
+      html_nodes("tr") %>%
+      map(~{
+        title <- .x %>% html_nodes("th") %>% html_text
+        if(length(title) == 0) title <- NA_character_
+        text <- .x %>% html_nodes("td") %>% html_children %>% html_text
+        if(length(text) == 0) text <- .x %>% html_nodes("td") %>% html_text
+        if(length(text) == 0) text <- NA_character_
+        links <- .x %>% html_nodes("td") %>% html_children %>% html_attr("href")
+        if(length(links) == 0) links <- NA_character_
+        party <- .x %>% html_node("#firstHeading") %>% html_text
+        #if(length(text) == 0) return(NULL)
+        tibble(party, title, text = list(text), links = links)
+      }) %>%
+      reduce(bind_rows)
+  }
+  if(length(page %>% html_nodes("p")) == 0){
+    text <- NULL
+  } else {
+    text <- page %>%
+      html_nodes("p") %>%
+      map(html_text)
+  }
+  
+  return(tibble(meta = list(meta_info), text = list(text)))
+  
+}
+
+```
+
+
+```{r}
+save(wiki_data, file = "data/wiki_data.Rdata")
+get_wiki_pos <- possibly(get_wiki, otherwise = NULL)
+
+wiki_data <- data %>%
+  filter(!is.na(wikipedia)) %>%
+  pull(wikipedia) %>%
+  future_map(get_wiki_pos, .progress = T)
+
+tmp <- wiki_data %>%
+  bind_rows
+
+
+get_ideology <- function(meta){
+  if(is.null(meta)) return(NULL)
+  meta %>%
+    unnest(text) %>%
+    filter(title == "Ideology") %>%
+    filter(!duplicated(text)) %>%
+    filter(text != "")
+}
+wiki_tmp <- tmp %>%
+  mutate(id = 1:nrow(.)) %>%
+  #slice(1:20) %>%
+  rename(full_text = text) 
+
+ideo <- wiki_tmp %>%
+  mutate(ideo = meta %>%
+           map(get_ideology)) %>%
+  filter(!ideo %>% map_lgl(is.null)) %>%
+  select(id, ideo) %>%
+  unnest(ideo)
+
+wiki_tmp %>%
+  right_join(ideo, by = "id") %>%
+  select(id, label = text, links, full_text)
+
+
+  unnest(full_text) 
+#mutate(full_text = text %>% map_chr(~.x %>% paste(collapse = " "))) %>%
+filter(ideo %>% map_lgl(~!is.null(.x))) %>%
+  unnest(ideo)
+
+wiki_final %>%
+  mutate(text = text %>%
+           str_remove("\\[\\d\\]"))
+count(text, sort = T)
+save(wiki_final, file = "data/wiki_final.Rdata")
+
+```
+
