@@ -1,0 +1,393 @@
+---
+title: "Text Classification"
+author: "Simon"
+date: '2019-02-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Packages
+
+```{r}
+pacman::p_load(tidyverse, purrr, furrr, h2o, keras)
+plan(multiprocess)
+```
+
+
+# Load Data
+
+```{r, eval = F}
+load("data/wiki_data.Rdata")
+glimpse(wiki_data[[1]])
+```
+
+
+# Data Engeneering
+
+## Extract Feature and Outcome
+
+```{r, eval = F}
+#wiki_data[[1]]$text %>% unlist
+wiki_text <- wiki_data %>% 
+  #.[1:10] %>%
+  imap_dfr(~{
+    text <- .x$text %>%
+      unlist %>%
+      str_remove_all("\\n|\\[.*?\\]") %>% 
+      str_remove_all('\\"') %>%
+      str_trim %>%
+      discard(~.x == "") %>%
+      paste(collapse = " ")
+    
+    
+    return(tibble(id = .y, text))
+  })
+
+get_ideology <- function(x){
+  x %>% 
+    filter(title == "Ideology") %>% 
+    .$text %>% 
+    unlist %>% 
+    unique %>% 
+    discard(~.x == "" | str_detect(.x, "\\[|\\]")) 
+}
+
+get_ideology_pos <- possibly(get_ideology, NULL)
+
+wiki_outcome_long <- wiki_data %>% 
+  imap_dfr(~{
+    
+    ideology <- .x$meta[[1]] %>% get_ideology_pos
+    if(is.null(ideology)) return(tibble(id = .y))
+
+    return(tibble(ideology) %>% mutate(id = .y))
+  })
+
+wanted_labels <- wiki_outcome_long %>%
+  count(ideology, sort = T) %>% 
+  drop_na %>%
+  slice(1:30) %>% 
+  pull(ideology)
+
+wiki_outcome_wide <- wiki_outcome_long %>%
+  split(.$id) %>%
+  map_dfr(~.x %>% filter(ideology %in% wanted_labels) %>% mutate(value = 1) %>% spread(ideology, value)) %>% 
+  mutate_all(function(x) ifelse(is.na(x), 0, x))
+```
+
+
+## Join Text and Outcome
+
+```{r, eval = F}
+wiki_joined <- wiki_text %>% 
+  left_join(wiki_outcome_wide) %>% 
+  filter(!is.na(Islamism)) %>% 
+  janitor::clean_names(.)
+
+wiki_joined %>% glimpse
+#table(is.na(wiki_joined$`Social democracy`))
+```
+
+
+## Lemmatize
+
+```{r, eval = F}
+plan(multiprocess)
+library(udpipe)
+#ud_english <- udpipe_download_model(language = "english")
+
+wiki_tokens <- wiki_joined %>% 
+ mutate(tokens = text %>% furrr::future_map(udpipe::udpipe, object = "english", .progress = T))
+
+
+# wiki_tokens$tokens[1:5]
+# wiki_tokens$lemma[1:5] 
+```
+
+
+```{r, eval = F}
+filter_udpipe_word <- function(tokens){
+ tokens %>% 
+  dplyr::anti_join(tidyTX::stop_words_en, by = c("token" = "word")) %>% 
+  split(.$sentence_id) %>% 
+  purrr::map_chr(~{
+    .x %>% 
+      dplyr::filter(!(upos %in% c("SYM", "NUM", "PUNCT"))) %>%
+      dplyr::pull(token) %>% 
+      stringr::str_to_lower() %>%
+      paste(collapse = " ")
+  })
+}
+
+filter_udpipe_lemma <- function(tokens){
+ tokens %>% 
+  dplyr::anti_join(tidyTX::stop_words_en, by = c("token" = "word")) %>% 
+  split(.$sentence_id) %>% 
+  purrr::map_chr(~{
+    .x %>% 
+      dplyr::filter(!(upos %in% c("SYM", "NUM", "PUNCT"))) %>%
+      dplyr::pull(lemma) %>% 
+      stringr::str_to_lower() %>%
+      #stringr::str_remove_all("[[:punct:]]") %>%
+      paste(collapse = " ")
+  })
+}
+
+filter_udpipe_lemma_adj <- function(tokens){
+  tokens %>% 
+    dplyr::anti_join(tidyTX::stop_words_en, by = c("token" = "word")) %>% 
+    split(.$sentence_id) %>% 
+    purrr::map_chr(~{
+      .x %>% 
+        dplyr::filter(upos %in% c("ADJ")) %>%
+        dplyr::pull(lemma) %>% 
+        stringr::str_to_lower() %>%
+        paste(collapse = " ")
+    })
+}
+
+filter_udpipe_word_pos <- purrr::possibly(filter_udpipe_word, NA_character_)
+filter_udpipe_lemma_pos <- purrr::possibly(filter_udpipe_lemma, NA_character_)
+filter_udpipe_lemma_adj_pos <- purrr::possibly(filter_udpipe_lemma_adj, NA_character_)
+
+wiki_tokens <- wiki_tokens %>% 
+  mutate(
+    word = tokens %>% furrr::future_map(filter_udpipe_word_pos, .progress = T),
+    lemma = tokens %>% furrr::future_map(filter_udpipe_lemma_pos, .progress = T),
+    lemma_adj = tokens %>% furrr::future_map(filter_udpipe_lemma_adj_pos, .progress = T)
+  )
+
+# save(wiki_tokens, file = "data/wiki_tokens.Rdata")
+```
+
+## Chunking
+
+* split into sentences
+
+```{r}
+load("data/wiki_tokens.Rdata")
+wiki_sentences <- wiki_tokens %>% 
+  select(-tokens, -lemma_adj) %>% 
+  unnest %>% 
+  mutate(
+    nwords = str_count(word, "\\W+"),
+    nchars = nchar(word)
+  ) %>% 
+  arrange(sample(1:n(), size = n())) %>% 
+  mutate(sp = sample(1:2, size = n(), replace = T, prob = c(.9, .1))) 
+
+wiki_sentences %>%
+  select(nwords, nchars) %>%
+  gather(var, value) %>%
+  filter(value < 500) %>%
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_wrap(~var, scales = "free")
+
+words <- wiki_sentences %>% 
+  tidytext::unnest_tokens(word, lemma, token = "words") %>% 
+  count(word, sort = T) %>% 
+  filter(n > 5)
+```
+
+
+```{r}
+wiki_sentences %>% 
+  glimpse
+```
+
+
+## Train/ Test Split
+
+```{r}
+train <- wiki_sentences %>% filter(sp == 1)
+test <- wiki_sentences %>% filter(sp == 2)
+```
+
+
+## Tokenizer (Keras)
+
+### Lemma
+
+```{r}
+max_features <- 15000 # top most common characters
+batch_size <- 32
+maxlen <- 30
+
+lemma_tokenizer <- text_tokenizer(num_words = max_features, char_level = F)
+fit_text_tokenizer(lemma_tokenizer, x = train$lemma)
+# keras::save_text_tokenizer(char_tokenizer, "models/char_tokenizer_86_mac")
+# char_tokenizer <- keras::load_text_tokenizer("models/char_tokenizer_windows")
+
+train_lemma_seq <- lemma_tokenizer %>% 
+  texts_to_sequences(train$lemma) %>% 
+  pad_sequences(maxlen = maxlen, value = 0)
+
+test_lemma_seq <- lemma_tokenizer %>%
+  texts_to_sequences(test$lemma) %>%
+  pad_sequences(maxlen = maxlen, value = 0)
+```
+
+
+### Character
+
+```{r}
+char_max_features <- 50 # top most common characters
+batch_size <- 32
+char_maxlen <- 300
+
+char_tokenizer <- text_tokenizer(num_words = char_max_features, char_level = T)
+fit_text_tokenizer(char_tokenizer, x = train$word)
+# keras::save_text_tokenizer(char_tokenizer, "models/char_tokenizer_86_mac")
+# char_tokenizer <- keras::load_text_tokenizer("models/char_tokenizer_windows")
+
+train_char_seq <- char_tokenizer %>% 
+  texts_to_sequences(train$word) %>% 
+  pad_sequences(maxlen = char_maxlen, value = 0)
+
+test_char_seq <- char_tokenizer %>%
+  texts_to_sequences(test$word) %>%
+  pad_sequences(maxlen = char_maxlen, value = 0)
+```
+
+
+# Model 
+
+```{r}
+get_model_cnn_gru <- function(
+    e_unique = 10000, 
+    e_inlen = 100, 
+    e_dim = 64, 
+    filters = 128,
+    kernel_size = 5,
+    pool_size = 4,
+    gru_units = 64,
+    out_dim = 1
+  ){
+  model <- keras_model_sequential() %>%
+    layer_embedding(
+      input_dim = e_unique, 
+      output_dim = e_dim, 
+      input_length = e_inlen
+    ) %>%
+    #layer_dropout(0.25) %>%
+    layer_conv_1d(
+      filters, 
+      kernel_size, 
+      padding = "valid",
+      activation = "relu",
+      strides = 1
+    ) %>%
+    layer_max_pooling_1d(pool_size) %>%
+    bidirectional(
+      layer_gru(units = gru_units, return_sequences = F, recurrent_dropout = 0.1) 
+    ) %>% 
+    #layer_lstm(units = 64, dropout = 0.3, recurrent_dropout = 0.2) %>% #
+    layer_dense(units = out_dim, activation = 'sigmoid') %>%
+    compile(
+      loss = "binary_crossentropy",
+      optimizer = "adam",
+      metrics = "accuracy"
+    )
+  #print(summary(model))
+  return(model)
+}
+```
+
+
+## Word Level
+
+```{r}
+s_cnn_gru <- get_model_cnn_gru(
+  e_inlen = maxlen, 
+  e_unique = max_features, 
+  e_dim = 128,
+  out_dim = 30
+)
+
+summary(s_cnn_gru)
+
+s_cnn_gru_history <- s_cnn_gru %>% 
+  keras::fit(
+    x = train_lemma_seq, 
+    y = train %>% select(social_democracy:left_wing_nationalism) %>% as.matrix,
+    batch_size = 32,
+    epochs = 2,
+    validation_split = .1
+  )
+```
+
+```{r}
+probs_cnn_gru <- predict(s_cnn_gru, x = test_lemma_seq) %>% 
+  as_tibble() %>%
+  mutate_all(function(x) ifelse(x > .5, 1, 0))
+
+test_mat <- test %>% 
+  select(social_democracy:left_wing_nationalism)
+  
+res_cnn_gru <- test_mat %>%
+  as.list %>%
+  map2_dfc(probs_cnn_gru, ~mean(.x == .y)) %>%
+  gather(outcome, accuracy) 
+
+res_cnn_gru %>% 
+  mutate(outcome = forcats::fct_reorder(outcome, accuracy)) %>%
+  ggplot(aes(outcome, accuracy)) +
+  geom_point() +
+  coord_flip() +
+  geom_hline(yintercept = mean(res_cnn_gru$accuracy)) +
+  ggtitle("Multi-Class Prediction Accuracy from hold-out Test Set", subtitle = "CNN-GRU (word level)")
+```
+
+
+## Character level
+
+
+```{r}
+s_cnn_gru_char <- get_model_cnn_gru(
+  e_inlen = char_maxlen, 
+  e_unique = char_max_features, 
+  e_dim = 25,
+  out_dim = 30
+)
+
+summary(s_cnn_gru_char)
+
+s_cnn_gru_char_history <- s_cnn_gru_char %>% 
+  keras::fit(
+    x = train_char_seq, 
+    y = train %>% select(social_democracy:left_wing_nationalism) %>% as.matrix,
+    batch_size = 32,
+    epochs = 2,
+    validation_split = .1
+  )
+```
+
+```{r}
+probs_cnn_gru_char <- predict(s_cnn_gru_char, x = test_char_seq) %>% 
+  as_tibble() %>%
+  mutate_all(function(x) ifelse(x > .5, 1, 0))
+
+test_mat <- test %>% 
+  select(social_democracy:left_wing_nationalism)
+  
+res_cnn_gru_char <- test_mat %>%
+  as.list %>%
+  map2_dfc(probs_cnn_gru_char, ~mean(.x == .y)) %>%
+  gather(outcome, accuracy) 
+
+res_cnn_gru_char %>% 
+  mutate(outcome = forcats::fct_reorder(outcome, accuracy)) %>%
+  ggplot(aes(outcome, accuracy)) +
+  geom_point() +
+  coord_flip() +
+  geom_hline(yintercept = mean(res_cnn_gru_char$accuracy)) +
+  ggtitle("Multi-Class Prediction Accuracy from hold-out Test Set", subtitle = "CNN-GRU (character level)")
+```
+
+
+
