@@ -242,7 +242,7 @@ char_maxlen <- 300
 
 char_tokenizer <- text_tokenizer(num_words = char_max_features, char_level = T)
 fit_text_tokenizer(char_tokenizer, x = train$word)
-# keras::save_text_tokenizer(char_tokenizer, "models/char_tokenizer_86_mac")
+# keras::save_text_tokenizer(char_tokenizer, "models/char_tokenizer_mac")
 # char_tokenizer <- keras::load_text_tokenizer("models/char_tokenizer_windows")
 
 train_char_seq <- char_tokenizer %>% 
@@ -365,6 +365,9 @@ s_cnn_gru_char_history <- s_cnn_gru_char %>%
     epochs = 2,
     validation_split = .1
   )
+
+#keras::save_model_hdf5(s_cnn_gru_char, filepath = "models/cnn_gru_char")
+#s_cnn_gru_char <- keras::load_model_hdf5("models/cnn_gru_char")
 ```
 
 ```{r}
