@@ -1,5 +1,5 @@
 ---
-title: "Main"
+title: "Wiki Scraper"
 author: "Benjamin"
 date: '2019-02-13'
 output: html_document
@@ -15,7 +15,7 @@ plan(multiprocess, workers = 2)
 
 ```{r}
 data <- read_csv("data/partyfacts-core-parties.csv")
-data
+#data
 ```
 
 ```{r}
@@ -24,7 +24,6 @@ data %>%
 ```
 
 ```{r}
-
 get_wiki <- function(url){
   
   page <- try(read_html(url))
@@ -60,14 +59,12 @@ get_wiki <- function(url){
   }
   
   return(tibble(meta = list(meta_info), text = list(text)))
-  
 }
-
 ```
 
 
 ```{r}
-save(wiki_data, file = "data/wiki_data.Rdata")
+#save(wiki_data, file = "data/wiki_data.Rdata")
 get_wiki_pos <- possibly(get_wiki, otherwise = NULL)
 
 wiki_data <- data %>%
@@ -77,7 +74,6 @@ wiki_data <- data %>%
 
 tmp <- wiki_data %>%
   bind_rows
-
 
 get_ideology <- function(meta){
   if(is.null(meta)) return(NULL)
@@ -113,7 +109,5 @@ wiki_final %>%
   mutate(text = text %>%
            str_remove("\\[\\d\\]"))
 count(text, sort = T)
-save(wiki_final, file = "data/wiki_final.Rdata")
-
+#save(wiki_final, file = "data/wiki_final.Rdata")
 ```
-
